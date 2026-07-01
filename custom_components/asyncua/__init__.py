@@ -10,7 +10,7 @@ import logging
 import time
 from typing import Any, Union
 
-from asyncua import Client, ua
+from asyncua import ua
 from asyncua.common import ua_utils
 from asyncua.ua.uatypes import DataValue
 import voluptuous as vol
@@ -27,6 +27,7 @@ from homeassistant.helpers.entity_component import DEFAULT_SCAN_INTERVAL
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
+from .connection_manager import OPCUAConnectionManager
 from .const import (
     ATTR_NODE_HUB,
     ATTR_NODE_ID,
@@ -166,17 +167,13 @@ class OpcuaHub:
             model=hub_model,
         )
 
-        """Asyncua client"""
-        self.client: Client = Client(
+        # Use persistent connection manager for OPC-UA server
+        self._connection_manager = OPCUAConnectionManager(
             url=hub_url,
-            timeout=5,
+            username=username,
+            password=password,
+            timeout=timeout,
         )
-        self.client.secure_channel_timeout = 60000  # 1 minute
-        self.client.session_timeout = 60000  # 1 minute
-        if self._username is not None:
-            self.client.set_user(username=self._username)
-        if self._password is not None:
-            self.client.set_password(pwd=self._password)
 
         self.packet_count: int = 0
         self.elapsed_time: float = 0
@@ -195,12 +192,23 @@ class OpcuaHub:
     @property
     def connected(self) -> bool:
         """Return connection status."""
-        return self._connected
+        return self._connection_manager.is_connected
 
     @connected.setter
     def connected(self, val: bool) -> None:
         """Set connection status."""
         self._connected = val
+
+    @property
+    def connection_manager(self) -> OPCUAConnectionManager:
+        """Return the connection manager."""
+        return self._connection_manager
+
+    async def _ensure_connected(self) -> bool:
+        """Ensure connection is established, connect if needed."""
+        if not self._connection_manager.is_connected:
+            return await self._connection_manager.connect()
+        return True
 
     @staticmethod
     def asyncua_wrapper(
@@ -213,11 +221,21 @@ class OpcuaHub:
             data = {}
             try:
                 start_time = time.perf_counter()
-                async with self.client:
-                    data = await func(self, *args, **kwargs)
-                    self.packet_count += 1
-                    self.elapsed_time = time.perf_counter() - start_time
-                    self.connected = True
+                
+                # Ensure connection is established
+                if not await self._ensure_connected():
+                    self._connected = False
+                    return data
+                
+                client = self._connection_manager.client
+                if client is None:
+                    raise RuntimeError("Connection failed to establish")
+                
+                data = await func(self, *args, **kwargs)
+                self.packet_count += 1
+                self.elapsed_time = time.perf_counter() - start_time
+                self._connected = True
+                
             except RuntimeError as e:
                 _LOGGER.error(
                     "RuntimeError while connecting to %s @ %s: %s",
@@ -225,7 +243,7 @@ class OpcuaHub:
                     self.hub_url,
                     e,
                 )
-                self.connected = False
+                self._connected = False
             except TimeoutError as e:
                 _LOGGER.error(
                     "Timeout while connecting to %s @ %s: %s",
@@ -233,7 +251,7 @@ class OpcuaHub:
                     self.hub_url,
                     e,
                 )
-                self.connected = False
+                self._connected = False
             except ConnectionRefusedError as e:
                 _LOGGER.error(
                     "Connection Refused Error while connecting to %s @ %s: %s",
@@ -241,7 +259,7 @@ class OpcuaHub:
                     self.hub_url,
                     e,
                 )
-                self.connected = False
+                self._connected = False
             return data
 
         return get_set_wrapper
@@ -249,7 +267,10 @@ class OpcuaHub:
     @asyncua_wrapper
     async def get_value(self, nodeid: str) -> Any:
         """Get node value and return value."""
-        node = self.client.get_node(nodeid=nodeid)
+        client = self._connection_manager.client
+        if client is None:
+            raise RuntimeError("No active connection")
+        node = client.get_node(nodeid=nodeid)
         return await node.read_value()
 
     @asyncua_wrapper
@@ -257,17 +278,26 @@ class OpcuaHub:
         """Get multiple node values and return value in zip dictionary format."""
         if not (node_key_pair):
             return {}
+        
+        client = self._connection_manager.client
+        if client is None:
+            raise RuntimeError("No active connection")
+        
         nodes = [
-            self.client.get_node(nodeid=nodeid) for key, nodeid in node_key_pair.items()
+            client.get_node(nodeid=nodeid) for key, nodeid in node_key_pair.items()
         ]
-        vals = await self.client.read_values(nodes=nodes)
+        vals = await client.read_values(nodes=nodes)
         self.cache_val = dict(zip(node_key_pair.keys(), vals, strict=True))
         return self.cache_val
 
     @asyncua_wrapper
     async def set_value(self, nodeid: str, value: Any) -> bool:
         """Get node variant type automatically and set the value."""
-        node = self.client.get_node(nodeid=nodeid)
+        client = self._connection_manager.client
+        if client is None:
+            raise RuntimeError("No active connection")
+        
+        node = client.get_node(nodeid=nodeid)
         node_type = await node.read_data_type_as_variant_type()
         var = ua.Variant(
             ua_utils.string_to_variant(
