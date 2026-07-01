@@ -73,6 +73,7 @@ async def async_setup_platform(
         if val_node[CONF_NODE_HUB] not in coordinator_nodes.keys():
             coordinator_nodes[val_node[CONF_NODE_HUB]] = []
         coordinator_nodes[val_node[CONF_NODE_HUB]].append(val_node)
+        _LOGGER.debug(f"Addto coordinator node {val_node[CONF_NODE_HUB]}: {val_node}")
 
     for key_coordinator, val_coordinator in coordinator_nodes.items():
         # Get the respective asyncua coordinator
@@ -82,6 +83,8 @@ async def async_setup_platform(
             )
         coordinators[key_coordinator] = hass.data[DOMAIN][key_coordinator]
         coordinators[key_coordinator].add_sensors(sensors=val_coordinator)
+        
+        _LOGGER.debug(f"coordiantors: {coordinators[key_coordinator]}")
 
         # Create sensors with injecting respective asyncua coordinator
         for _idx_sensor, val_sensor in enumerate(val_coordinator):
@@ -115,6 +118,7 @@ class AsyncuaSensor(CoordinatorEntity[AsyncuaCoordinator], SensorEntity):
         unit_of_measurement: Union[str, None] = None,
     ) -> None:
         """Initialize the entity."""
+        _LOGGER.debug(f"typed coordinator: {coordinator.data}")
         super().__init__(coordinator=coordinator)
         self._attr_name = name
         self._attr_unique_id = (
@@ -152,6 +156,8 @@ class AsyncuaSensor(CoordinatorEntity[AsyncuaCoordinator], SensorEntity):
             raise ConfigEntryError(
                 f"Unable to find {self._attr_name} in coordinator {self.coordinator.name}"
             )
+        _LOGGER.debug(f"get coordinator data for {self._attr_name}")
+        _LOGGER.debug(f"coordinatorDump: {coordinator_data}")
         return coordinator_data.get(self._attr_name)
 
     @callback

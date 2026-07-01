@@ -126,6 +126,7 @@ async def async_setup(
                 ),
             ),
         )
+        await hass.data[DOMAIN][hub[CONF_HUB_ID]].async_connect_hub()
         await hass.data[DOMAIN][hub[CONF_HUB_ID]].async_request_refresh()
         hass.services.async_register(
             domain=DOMAIN,
@@ -202,6 +203,45 @@ class OpcuaHub:
         """Set connection status."""
         self._connected = val
 
+    async def connect(self) -> bool:
+        """Connect to OPC-UA server."""
+        try:
+            await self.client.connect()
+            self.connected = True
+            _LOGGER.info(
+                "Connected to OPC-UA server %s @ %s",
+                self.hub_name,
+                self.hub_url,
+            )
+            return True
+        except Exception as e:
+            _LOGGER.error(
+                "Failed to connect to %s @ %s: %s",
+                self.hub_name,
+                self.hub_url,
+                e,
+            )
+            self.connected = False
+            return False
+
+    async def disconnect(self) -> None:
+        """Disconnect from OPC-UA server."""
+        try:
+            await self.client.disconnect()
+            self.connected = False
+            _LOGGER.info(
+                "Disconnected from OPC-UA server %s @ %s",
+                self.hub_name,
+                self.hub_url,
+            )
+        except Exception as e:
+            _LOGGER.error(
+                "Error disconnecting from %s @ %s: %s",
+                self.hub_name,
+                self.hub_url,
+                e,
+            )
+
     @staticmethod
     def asyncua_wrapper(
         func: Callable[..., Any],
@@ -213,11 +253,20 @@ class OpcuaHub:
             data = {}
             try:
                 start_time = time.perf_counter()
-                async with self.client:
-                    data = await func(self, *args, **kwargs)
-                    self.packet_count += 1
-                    self.elapsed_time = time.perf_counter() - start_time
-                    self.connected = True
+                
+                # Reconnect if not connected
+                if not self.connected:
+                    await self.connect()
+                
+                if not self.connected:
+                    _LOGGER.warning("Not connected to %s @ %s", self.hub_name, self.hub_url)
+                    return data
+                
+                data = await func(self, *args, **kwargs)
+                self.packet_count += 1
+                self.elapsed_time = time.perf_counter() - start_time
+                self.connected = True
+                
             except RuntimeError as e:
                 _LOGGER.error(
                     "RuntimeError while connecting to %s @ %s: %s",
@@ -242,6 +291,15 @@ class OpcuaHub:
                     e,
                 )
                 self.connected = False
+            except Exception as e:
+                _LOGGER.error(
+                    "Unexpected error while communicating with %s @ %s: %s",
+                    self.hub_name,
+                    self.hub_url,
+                    e,
+                )
+                self.connected = False
+            
             return data
 
         return get_set_wrapper
@@ -321,6 +379,10 @@ class AsyncuaCoordinator(DataUpdateCoordinator):
         for _idx_sensor, val_sensor in enumerate(self._sensors):
             self._node_key_pair[val_sensor[CONF_NODE_NAME]] = val_sensor[CONF_NODE_ID]
         return True
+
+    async def async_connect_hub(self) -> None:
+        """Connect to the OPC-UA hub."""
+        await self.hub.connect()
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Update the state of the sensor."""
